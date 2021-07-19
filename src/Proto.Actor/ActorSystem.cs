@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Proto.Extensions;
+using Proto.Future;
 using Proto.Metrics;
 using Proto.Utils;
 
@@ -37,6 +38,7 @@ namespace Proto
             Metrics = new ProtoMetrics(config.MetricsProviders);
             ProcessRegistry.TryAdd("eventstream", new EventStreamProcess(this));
             Extensions = new ActorSystemExtensions(this);
+            DeferredFuture = new Lazy<FutureFactory>(() => new FutureFactory(this, config.SharedFutures, config.SharedFutureSize));
 
             RunThreadPoolStats();
         }
@@ -61,6 +63,10 @@ namespace Proto
 
         public ActorSystemExtensions Extensions { get; }
 
+        private Lazy<FutureFactory> DeferredFuture { get; }
+
+        internal FutureFactory Future => DeferredFuture.Value;
+
         public CancellationToken Shutdown => _cts.Token;
 
         private void RunThreadPoolStats()
@@ -72,7 +78,14 @@ namespace Proto
                     Metrics.InternalActorMetrics.ThreadPoolLatencyHistogram.Observe(t, new[] {Id, Address});
 
                     //does it take longer than 1 sec for a task to start executing?
-                    if (t > TimeSpan.FromSeconds(1)) logger.LogWarning("ThreadPool is running hot, Threadpool latency {ThreadPoolLatency}", t);
+                    if (t <= Config.ThreadPoolStatsTimeout) return;
+
+                    if (Config.DeveloperThreadPoolStatsLogging)
+                    {
+                        Console.WriteLine($"System {Id} - ThreadPool is running hot, ThreadPool latency {t}");    
+                    }
+                        
+                    logger.LogWarning("System {Id} - ThreadPool is running hot, ThreadPool latency {ThreadPoolLatency}", Id, t);
                 }, _cts.Token
             );
         }
@@ -94,5 +107,7 @@ namespace Proto
             new(this, headers, middleware);
 
         public (string Host, int Port) GetAddress() => (_host, _port);
+
+        public Props ConfigureProps(Props props) => Config.ConfigureProps(props);
     }
 }

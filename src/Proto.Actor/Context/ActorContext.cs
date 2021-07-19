@@ -159,15 +159,17 @@ namespace Proto.Context
                     break;
             }
         }
-        
+
         public void Request(PID target, object message, PID? sender)
         {
             var messageEnvelope = new MessageEnvelope(message, sender);
             SendUserMessage(target, messageEnvelope);
         }
 
+        //why does this method exist here and not as an extension?
+        //because DecoratorContexts needs to go this way if we want to intercept this method for the context
         public Task<T> RequestAsync<T>(PID target, object message, CancellationToken cancellationToken)
-            => this.RequestAsync<T>(target, message, new FutureProcess(System, cancellationToken));
+            => SenderContextExtensions.RequestAsync<T>(this, target, message, cancellationToken);
 
         public void ReenterAfter<T>(Task<T> target, Func<Task<T>, Task> action)
         {
@@ -209,11 +211,11 @@ namespace Proto.Context
 
         public Task StopAsync(PID pid)
         {
-            var future = new FutureProcess(System);
+            var future = System.Future.Get();
 
             pid.SendSystemMessage(System, new Watch(future.Pid));
             Stop(pid);
-
+            // ReSharper disable once MethodSupportsCancellation
             return future.Task;
         }
 
@@ -282,7 +284,7 @@ namespace Proto.Context
                 var res = System.Config.DiagnosticsSerializer(Actor!);
                 diagnosticsString += res;
             }
-            
+
             processDiagnosticsRequest.Result.SetResult(diagnosticsString);
 
             return default;
@@ -377,13 +379,11 @@ namespace Proto.Context
         public static ActorContext Setup(ActorSystem system, Props props, PID? parent, PID self, IMailbox mailbox) =>
             new(system, props, parent, self, mailbox);
 
+        //Note to self, the message must be sent no-matter if the task failed or not.
+        //do not mess this up by first awaiting and then sending on success only
         private void ScheduleContinuation(Task target, Continuation cont) =>
-            _ = SafeTask.Run(async () => {
-                    await target;
-                    Self.SendSystemMessage(System, cont);
-                }
-                , CancellationToken.None
-            );
+            // ReSharper disable once MethodSupportsCancellation
+            _ = target.ContinueWith(_ => Self.SendSystemMessage(System, cont));
 
         private static ValueTask HandleUnknownSystemMessage(object msg)
         {
@@ -420,9 +420,9 @@ namespace Proto.Context
         private Task HandleAutoRespond(IAutoRespond autoRespond)
         {
             // receive normally
-            var res =  Actor!.ReceiveAsync(_props.ContextDecoratorChain is not null ? EnsureExtras().Context : this);
+            var res = Actor!.ReceiveAsync(_props.ContextDecoratorChain is not null ? EnsureExtras().Context : this);
             //then respond automatically
-            var response = autoRespond.GetAutoResponse();
+            var response = autoRespond.GetAutoResponse(this);
             Respond(response);
             //return task from receive
             return res;
@@ -635,5 +635,7 @@ namespace Proto.Context
 
             SendUserMessage(Self, Proto.ReceiveTimeout.Instance);
         }
+
+        public IFuture GetFuture() => System.Future.Get();
     }
 }

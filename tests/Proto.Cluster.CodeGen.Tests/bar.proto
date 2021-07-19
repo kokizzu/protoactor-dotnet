@@ -1,0 +1,19 @@
+syntax = "proto3";
+package Bar;
+option csharp_namespace = "Acme.Mysystem.Bar";
+
+message SomeCommand{
+  
+}
+
+message GetCurrentStateResponse {
+  
+}
+ 
+message Query {
+
+}
+
+message Response {
+
+}

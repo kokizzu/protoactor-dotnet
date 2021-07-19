@@ -6,11 +6,14 @@ using Microsoft.Extensions.Logging;
 using Proto;
 using Proto.Cluster;
 using Proto.Cluster.Consul;
+using Proto.Cluster.Identity;
+using Proto.Cluster.Identity.Redis;
 using Proto.Cluster.Partition;
 using Proto.Cluster.PubSub;
 using Proto.Remote;
 using Proto.Remote.GrpcCore;
 using Proto.Utils;
+using StackExchange.Redis;
 
 namespace ClusterPubSub
 {
@@ -33,17 +36,13 @@ namespace ClusterPubSub
             {
                 subscriberCount = 10;
             }
-
-            if (runRemote)
-            {
-                //starting remote node...
-                await RunMember();
-            }
-
+            
             var system = GetSystem();
 
             if (runRemote)
             {
+                await RunMember(); //start the subscriber node
+                
                 await system
                     .Cluster()
                     .StartClientAsync();
@@ -58,7 +57,7 @@ namespace ClusterPubSub
             var props = Props.FromFunc(ctx => {
                     if (ctx.Message is SomeMessage s)
                     {
-                     //   Console.Write(".");
+                 //       Console.Write(".");
                     }
 
                     return Task.CompletedTask;
@@ -68,11 +67,8 @@ namespace ClusterPubSub
             for (int j = 0; j < subscriberCount; j++)
             {
                 var pid1 = system.Root.Spawn(props);
-                // var pid2 = system.Root.Spawn(props);
-
                 //subscribe the pid to the my-topic
                 await system.Cluster().Subscribe("my-topic", pid1);
-                //   await system.Cluster().Subscribe("my-topic", pid2);
             }
 
             //get hold of a producer that can send messages to the my-topic
@@ -83,7 +79,7 @@ namespace ClusterPubSub
             var sw = Stopwatch.StartNew();
             var tasks = new List<Task>();
 
-            for (int i = 0; i < 100; i++)
+            for (var i = 0; i < 100; i++)
             {
                 var t = p.ProduceAsync(new SomeMessage
                     {
@@ -139,10 +135,18 @@ namespace ClusterPubSub
             
             var clusterConfig =
                 ClusterConfig
-                    .Setup("MyCluster", consulProvider, new PartitionIdentityLookup())
+                    .Setup("MyCluster", consulProvider, GetRedisIdentityLookup())
                     .WithClusterKind("topic", Props.FromProducer(() => new TopicActor(store)))
                     .WithPubSubBatchSize(batchSize);
             return clusterConfig;
+        }
+        
+        private static IIdentityLookup GetRedisIdentityLookup()
+        {
+            var multiplexer = ConnectionMultiplexer.Connect("localhost:6379");
+            var redisIdentityStorage = new RedisIdentityStorage("mycluster", multiplexer,maxConcurrency:50);
+
+            return new IdentityStorageLookup(redisIdentityStorage);
         }
 
         public static async Task RunMember()
@@ -151,6 +155,8 @@ namespace ClusterPubSub
             await system
                 .Cluster()
                 .StartMemberAsync();
+            
+            Console.WriteLine("Started worker node...");
         }
     }
 }

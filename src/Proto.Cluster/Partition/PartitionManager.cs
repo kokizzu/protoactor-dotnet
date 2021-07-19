@@ -21,14 +21,16 @@ namespace Proto.Cluster.Partition
         private PID _partitionPlacementActor = null!;
         private PID _partitionIdentityActor = null!;
         private readonly TimeSpan _identityHandoverTimeout;
+        private readonly PartitionConfig _config;
 
-        internal PartitionManager(Cluster cluster, bool isClient, TimeSpan identityHandoverTimeout)
+        internal PartitionManager(Cluster cluster, bool isClient, TimeSpan identityHandoverTimeout, PartitionConfig? config=null)
         {
             _cluster = cluster;
             _system = cluster.System;
             _context = _system.Root;
             _isClient = isClient;
             _identityHandoverTimeout = identityHandoverTimeout;
+            _config = config ?? new PartitionConfig(false);
         }
 
         internal PartitionMemberSelector Selector { get; } = new();
@@ -40,9 +42,9 @@ namespace Proto.Cluster.Partition
                 var eventId = 0ul;
                 //make sure selector is updated first
                 _system.EventStream.Subscribe<ClusterTopology>(e => {
-                        if (e.EventId == eventId) return;
+                        if (e.TopologyHash == eventId) return;
 
-                        eventId = e.EventId;
+                        eventId = e.TopologyHash;
                         Selector.Update(e.Members.ToArray());
                     }
                 );
@@ -50,22 +52,22 @@ namespace Proto.Cluster.Partition
             else
             {
                 var partitionActorProps = Props
-                    .FromProducer(() => new PartitionIdentityActor(_cluster, _identityHandoverTimeout))
+                    .FromProducer(() => new PartitionIdentityActor(_cluster, _identityHandoverTimeout, _config))
                     .WithGuardianSupervisorStrategy(Supervision.AlwaysRestartStrategy);
                 _partitionIdentityActor = _context.SpawnNamed(partitionActorProps, PartitionIdentityActorName);
 
                 var partitionActivatorProps =
-                    Props.FromProducer(() => new PartitionPlacementActor(_cluster));
+                    Props.FromProducer(() => new PartitionPlacementActor(_cluster, _config));
                 _partitionPlacementActor = _context.SpawnNamed(partitionActivatorProps, PartitionPlacementActorName);
 
                 //synchronous subscribe to keep accurate
 
-                var eventId = 0ul;
+                var topologyHash = 0ul;
                 //make sure selector is updated first
                 _system.EventStream.Subscribe<ClusterTopology>(e => {
-                        if (e.EventId == eventId) return;
+                        if (e.TopologyHash == topologyHash) return;
 
-                        eventId = e.EventId;
+                        topologyHash = e.TopologyHash;
 
                         Selector.Update(e.Members.ToArray());
                         _context.Send(_partitionIdentityActor, e);

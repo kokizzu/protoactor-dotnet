@@ -10,17 +10,38 @@ using Proto.Metrics;
 
 namespace Proto.Future
 {
-    public sealed class FutureProcess : Process, IDisposable
+    public interface IFuture : IDisposable
     {
-        private readonly CancellationTokenSource? _cts;
+        public PID Pid { get; }
+        public Task<object> Task { get; }
+
+        public Task<object> GetTask(CancellationToken cancellationToken);
+    }
+    
+    public sealed class FutureFactory
+    {
+        private ActorSystem System { get; }
+        private readonly SharedFutureProcess? _sharedFutureProcess;
+
+        public FutureFactory(ActorSystem system, bool useSharedFutures, int sharedFutureSize)
+        {
+            System = system;
+
+            _sharedFutureProcess = useSharedFutures ? new SharedFutureProcess(system, sharedFutureSize) : null;
+        }
+
+        public IFuture Get() => _sharedFutureProcess?.TryCreateHandle() ?? SingleProcessHandle();
+
+        private IFuture SingleProcessHandle() => new FutureProcess(System);
+    }
+
+    public sealed class FutureProcess : Process, IFuture
+    {
         private readonly TaskCompletionSource<object> _tcs;
         private readonly ActorMetrics? _metrics;
-        private readonly ActorSystem _system;
 
-        internal FutureProcess(ActorSystem system, CancellationToken cancellationToken = default) : base(system)
+        internal FutureProcess(ActorSystem system) : base(system)
         {
-            _system = system;
-
             if (!system.Metrics.IsNoop)
             {
                 _metrics = system.Metrics.Get<ActorMetrics>();
@@ -29,53 +50,54 @@ namespace Proto.Future
 
             _tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            if (cancellationToken != default)
-            {
-                _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            }
-
             var name = System.ProcessRegistry.NextId();
             var (pid, absent) = System.ProcessRegistry.TryAdd(name, this);
-            
+
             if (!absent) throw new ProcessNameExistException(name, pid);
 
+            pid.RequestId = 1;
             Pid = pid;
-            
-            _cts?.Token.Register(
-                () => {
-                    if (_tcs.Task.IsCompleted) return;
-
-                    _tcs.TrySetException(
-                        new TimeoutException("Request didn't receive any Response within the expected time.")
-                    );
-
-                    if (!system.Metrics.IsNoop)
-                    {
-                        _metrics!.FuturesTimedOutCount.Inc(new[] {System.Id, system.Address});
-                    }
-                    Stop(pid);
-                }
-                , false);
-
-            Task = _tcs.Task;
         }
 
         public PID Pid { get; }
-        public Task<object> Task { get; }
+        public Task<object> Task => _tcs.Task;
+
+        public async Task<object> GetTask(CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (cancellationToken == default)
+                {
+                    return await _tcs.Task;
+                }
+
+                await using (cancellationToken.Register(() => _tcs.TrySetCanceled()))
+                {
+                    return await _tcs.Task;
+                }
+            }
+            catch
+            {
+                if (!System.Metrics.IsNoop)
+                {
+                    _metrics!.FuturesTimedOutCount.Inc(new[] {System.Id, System.Address});
+                }
+
+                Stop(Pid!);
+                throw new TimeoutException("Request didn't receive any Response within the expected time.");
+            }
+        }
 
         protected internal override void SendUserMessage(PID pid, object message)
         {
             try
             {
-                _tcs.TrySetResult(MessageEnvelope.UnwrapMessage(message)!);
+                _tcs.TrySetResult(message!);
             }
             finally
             {
-                if (!_system.Metrics.IsNoop)
-                {
-                    _metrics!.FuturesCompletedCount.Inc(new[] {System.Id, System.Address});
-                }
-                
+                _metrics?.FuturesCompletedCount.Inc(new[] {System.Id, System.Address});
+
                 Stop(Pid);
             }
         }
@@ -84,14 +106,13 @@ namespace Proto.Future
         {
             if (message is Stop)
             {
-                System.ProcessRegistry.Remove(Pid);
-                _cts?.Dispose();
+                Dispose();
                 return;
             }
 
-            if (_cts is null || !_cts.IsCancellationRequested) _tcs.TrySetResult(default!);
+            _tcs.TrySetResult(default!);
 
-            if (!_system.Metrics.IsNoop)
+            if (!System.Metrics.IsNoop)
             {
                 _metrics!.FuturesCompletedCount.Inc(new[] {System.Id, System.Address});
             }
@@ -99,10 +120,6 @@ namespace Proto.Future
             Stop(pid);
         }
 
-        public void Dispose()
-        {
-            System.ProcessRegistry.Remove(Pid);
-            _cts?.Dispose();
-        }
+        public void Dispose() => System.ProcessRegistry.Remove(Pid);
     }
 }

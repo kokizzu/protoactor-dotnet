@@ -5,11 +5,13 @@
 // -----------------------------------------------------------------------
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
+using Proto.Cluster.Gossip;
 using Proto.Cluster.Identity;
 using Proto.Cluster.Metrics;
 using Proto.Cluster.PubSub;
@@ -30,23 +32,29 @@ namespace Proto.Cluster
 
             system.Extensions.Register(this);
             system.Metrics.Register(new ClusterMetrics(system.Metrics));
-            system.Serialization().RegisterFileDescriptor(ClusterContractsReflection.Descriptor);
+            
+            //register cluster messages
+            var serialization = system.Serialization();
+            serialization.RegisterFileDescriptor(ClusterContractsReflection.Descriptor);
+            serialization.RegisterFileDescriptor(GossipContractsReflection.Descriptor);
+            serialization.RegisterFileDescriptor(PubSubContractsReflection.Descriptor);
+            serialization.RegisterFileDescriptor(GrainContractsReflection.Descriptor);
 
+            Gossip = new Gossiper(this);
             PidCache = new PidCache();
-            ClusterHeartBeat = new ClusterHeartBeat(this);
             PubSub = new PubSubManager(this);
 
             SubscribeToTopologyEvents();
         }
 
-        private ClusterHeartBeat ClusterHeartBeat { get; }
-
         public PubSubManager PubSub { get; }
 
         public static ILogger Logger { get; } = Log.CreateLogger<Cluster>();
-     
+
         public IClusterContext ClusterContext { get; private set; } = null!;
 
+        public Gossiper Gossip { get; }
+        
         public ClusterConfig Config { get; }
 
         public ActorSystem System { get; }
@@ -58,8 +66,6 @@ namespace Proto.Cluster
         internal IIdentityLookup IdentityLookup { get; set; } = null!;
 
         internal IClusterProvider Provider { get; set; } = null!;
-
-        public string LoggerId => System.Id;
 
         public PidCache PidCache { get; }
 
@@ -81,8 +87,9 @@ namespace Proto.Cluster
         public async Task StartMemberAsync()
         {
             await BeginStartAsync(false);
+            //gossiper must be started whenever any topology events starts flowing
+            await Gossip.StartAsync();
             await Provider.StartMemberAsync(this);
-
             Logger.LogInformation("Started as cluster member");
         }
 
@@ -112,7 +119,6 @@ namespace Proto.Cluster
             var kinds = GetClusterKinds();
             await IdentityLookup.SetupAsync(this, kinds, client);
             InitIdentityProxy();
-            await ClusterHeartBeat.StartAsync();
             await PubSub.StartAsync();
         }
 
@@ -132,7 +138,7 @@ namespace Proto.Cluster
             await System.ShutdownAsync();
             Logger.LogInformation("Stopping Cluster {Id}", System.Id);
 
-            await ClusterHeartBeat.ShutdownAsync();
+            await Gossip.ShutdownAsync();
             if (graceful) await IdentityLookup!.ShutdownAsync();
             await Config!.ClusterProvider.ShutdownAsync(graceful);
             await Remote.ShutdownAsync(graceful);
@@ -140,14 +146,10 @@ namespace Proto.Cluster
             Logger.LogInformation("Stopped Cluster {Id}", System.Id);
         }
 
-        public Task<PID?> GetAsync(string identity, string kind, CancellationToken ct) =>
-            IdentityLookup!.GetAsync(new ClusterIdentity {Identity = identity, Kind = kind}, ct);
+        public Task<PID?> GetAsync(ClusterIdentity clusterIdentity, CancellationToken ct) => IdentityLookup!.GetAsync(clusterIdentity, ct);
 
-        public Task<T> RequestAsync<T>(string identity, string kind, object message, CancellationToken ct) =>
-            ClusterContext.RequestAsync<T>(new ClusterIdentity {Identity = identity, Kind = kind}, message, System.Root, ct)!;
-
-        public Task<T> RequestAsync<T>(string identity, string kind, object message, ISenderContext context, CancellationToken ct) =>
-            ClusterContext.RequestAsync<T>(new ClusterIdentity {Identity = identity, Kind = kind}, message, context, ct)!;
+        public Task<T> RequestAsync<T>(ClusterIdentity clusterIdentity, object message, ISenderContext context, CancellationToken ct) =>
+            ClusterContext.RequestAsync<T>(clusterIdentity, message, context, ct)!;
 
         public ActivatedClusterKind GetClusterKind(string kind)
         {
@@ -162,6 +164,22 @@ namespace Proto.Cluster
             _clusterKinds.TryGetValue(kind, out var clusterKind);
 
             return clusterKind;
+        }
+
+        public ClusterIdentity GetIdentity(string identity, string kind)
+        {
+            var id = new ClusterIdentity
+            {
+                Identity = identity,
+                Kind = kind
+            };
+
+            if (PidCache.TryGet(id, out var pid))
+            {
+                id.CachedPid = pid;
+            }
+
+            return id;
         }
     }
 }

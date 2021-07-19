@@ -4,9 +4,11 @@ using System.Linq;
 using System.Threading.Tasks;
 using ClusterTest.Messages;
 using Microsoft.Extensions.Logging;
+using Proto.Cluster.Cache;
 using Proto.Cluster.Identity;
 using Proto.Cluster.Partition;
 using Proto.Cluster.Testing;
+using Proto.Logging;
 using Proto.Remote;
 using Proto.Remote.GrpcCore;
 using Xunit;
@@ -18,6 +20,8 @@ namespace Proto.Cluster.Tests
         IList<Cluster> Members { get; }
 
         public Task<Cluster> SpawnNode();
+        
+        LogStore LogStore { get; }
 
         Task RemoveNode(Cluster member, bool graceful = true);
     }
@@ -36,15 +40,16 @@ namespace Proto.Cluster.Tests
             _clusterName = $"test-cluster-{Guid.NewGuid().ToString().Substring(0, 6)}";
         }
 
-        protected virtual ClusterKind[] ClusterKinds => new []
+        protected virtual ClusterKind[] ClusterKinds => new[]
         {
             new ClusterKind(EchoActor.Kind, EchoActor.Props.WithClusterRequestDeduplication()),
             new ClusterKind(EchoActor.Kind2, EchoActor.Props),
             new ClusterKind(EchoActor.LocalAffinityKind, EchoActor.Props).WithLocalAffinityRelocationStrategy()
-            
         };
 
         public async Task InitializeAsync() => Members = await SpawnClusterNodes(_clusterSize, _configure).ConfigureAwait(false);
+
+        public LogStore LogStore { get; } = new();
 
         public async Task DisposeAsync()
         {
@@ -101,7 +106,13 @@ namespace Proto.Cluster.Tests
                 .WithClusterKinds(ClusterKinds);
 
             config = configure?.Invoke(config) ?? config;
-            var system = new ActorSystem();
+
+            var system = new ActorSystem(GetActorSystemConfig());
+            system.Extensions.Register(new InstanceLogger(LogLevel.Debug,LogStore,category:system.Id));
+
+            var logger = system.Logger()?.BeginScope<EventStream>();
+            system.EventStream.Subscribe<object>(e => { logger?.LogDebug("EventStream {MessageType}:{Message}", e.GetType().Name, e); }
+            );
 
             var remoteConfig = GrpcCoreRemoteConfig.BindToLocalhost().WithProtoMessages(MessagesReflection.Descriptor);
             var _ = new GrpcCoreRemote(system, remoteConfig);
@@ -111,6 +122,8 @@ namespace Proto.Cluster.Tests
             await cluster.StartMemberAsync();
             return cluster;
         }
+
+        protected virtual ActorSystemConfig GetActorSystemConfig() => ActorSystemConfig.Setup();
 
         protected abstract IClusterProvider GetClusterProvider();
 
@@ -140,6 +153,45 @@ namespace Proto.Cluster.Tests
     {
         public InMemoryClusterFixture() : base(3, config => config.WithActorRequestTimeout(TimeSpan.FromSeconds(4)))
         {
+        }
+    }
+
+    public class InMemoryClusterFixtureAlternativeClusterContext : BaseInMemoryClusterFixture
+    {
+        public InMemoryClusterFixtureAlternativeClusterContext() : base(3, config => config
+            .WithActorRequestTimeout(TimeSpan.FromSeconds(4))
+            .WithClusterContextProducer(cluster => new ExperimentalClusterContext(cluster))
+        )
+        {
+        }
+    }
+
+    public class InMemoryClusterFixtureSharedFutures : BaseInMemoryClusterFixture
+    {
+        public InMemoryClusterFixtureSharedFutures() : base(3, config => config
+            .WithActorRequestTimeout(TimeSpan.FromSeconds(4))
+            .WithClusterContextProducer(cluster => new ExperimentalClusterContext(cluster))
+        )
+        {
+        }
+
+        protected override ActorSystemConfig GetActorSystemConfig() => ActorSystemConfig.Setup().WithSharedFutures();
+    }
+
+    public class InMemoryPidCacheInvalidationClusterFixture : BaseInMemoryClusterFixture
+    {
+        public InMemoryPidCacheInvalidationClusterFixture() : base(3, config => config
+            .WithActorRequestTimeout(TimeSpan.FromSeconds(4))
+        )
+        {
+        }
+
+        protected override ClusterKind[] ClusterKinds => base.ClusterKinds.Select(ck => ck.WithPidCacheInvalidation()).ToArray();
+
+        protected override async Task<Cluster> SpawnClusterMember(Func<ClusterConfig, ClusterConfig> configure)
+        {
+            var cluster = await base.SpawnClusterMember(configure);
+            return cluster.WithPidCacheInvalidation();
         }
     }
 }

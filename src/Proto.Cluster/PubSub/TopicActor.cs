@@ -28,7 +28,7 @@ namespace Proto.Cluster.PubSub
 
         public Task ReceiveAsync(IContext context) => context.Message switch
         {
-            ClusterInit ci             => OnClusterInit(context, ci),
+            ClusterInit ci             => OnClusterInit(context),
             SubscribeRequest sub       => OnSubscribe(context, sub),
             UnsubscribeRequest unsub   => OnUnsubscribe(context, unsub),
             ProducerBatchMessage batch => OnProducerBatch(context, batch),
@@ -55,7 +55,7 @@ namespace Proto.Cluster.PubSub
                         let deliveryPid = PID.FromAddress(address, PubSubManager.PubSubDeliveryName)
                         select context.RequestAsync<PublishResponse>(deliveryPid, deliveryMessage)).Cast<Task>()
                 .ToList();
-
+            
             await Task.WhenAll(acks);
 
             //ack back to producer
@@ -85,11 +85,16 @@ namespace Proto.Cluster.PubSub
 
        
 
-        private async Task OnClusterInit(IContext context, ClusterInit ci)
+        private async Task OnClusterInit(IContext context)
         {
-            _topic = ci.Identity;
+            _topic = context.Get<ClusterIdentity>()!.Identity;
             var subs = await LoadSubscriptions(_topic);
-            _subscribers = ImmutableHashSet.CreateRange(subs.Subscribers_);
+
+            if (subs?.Subscribers_ is not null)
+            {
+                _subscribers = ImmutableHashSet.CreateRange(subs.Subscribers_);
+            }
+
             Logger.LogInformation("Topic {Topic} started", _topic);
         }
 

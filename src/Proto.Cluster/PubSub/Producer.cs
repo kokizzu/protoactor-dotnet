@@ -66,8 +66,7 @@ namespace Proto.Cluster.PubSub
         public async Task PublishBatch(ProducerBatchMessage batch)
         {
             //TODO: retries etc...
-
-            await _cluster.RequestAsync<PublishResponse>(_topic, "topic", batch, CancellationToken.None);
+            await _cluster.RequestAsync<PublishResponse>(_topic, "topic", batch, CancellationTokens.FromSeconds(5));
 
             foreach (var tcs in batch.DeliveryReports)
             {

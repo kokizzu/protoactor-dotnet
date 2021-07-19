@@ -28,6 +28,14 @@ namespace Proto
         }
     }
 
+    public sealed partial class Touch : IAutoRespond
+    {
+        public object GetAutoResponse(IContext context) => new Touched()
+        {
+            Who = context.Self
+        };
+    }
+
     public sealed partial class PoisonPill : IIgnoreDeadLetterLogging
     {
         public static readonly PoisonPill Instance = new();
@@ -124,4 +132,9 @@ namespace Proto
     }
 
     public record ProcessDiagnosticsRequest(TaskCompletionSource<string> Result) : SystemMessage;
+    
+    public static class Nothing
+    {
+        public static readonly Google.Protobuf.WellKnownTypes.Empty Instance = new();
+    }
 }

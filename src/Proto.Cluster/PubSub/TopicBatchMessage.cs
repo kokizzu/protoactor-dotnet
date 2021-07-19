@@ -5,13 +5,14 @@
 // -----------------------------------------------------------------------
 using System.Collections.Generic;
 using System.Linq;
+using Proto.Cluster.PubSub;
 using Proto.Remote;
 
-namespace Proto.Cluster
+namespace Proto.Cluster.PubSub
 {
     public record TopicBatchMessage(IReadOnlyCollection<object> Envelopes) :  IRootSerializable , IMessageBatch, IAutoRespond
     {
-        public object GetAutoResponse() => new PublishResponse();
+        public object GetAutoResponse(IContext context) => new PublishResponse();
         
         public IReadOnlyCollection<object> GetMessages() => Envelopes;
         
@@ -23,8 +24,7 @@ namespace Proto.Cluster
             foreach (var message in Envelopes)
             {
                 
-                var typeName = s.GetTypeName(message, s.DefaultSerializerId);
-                var messageData = s.Serialize(message, s.DefaultSerializerId);
+                var (messageData, typeName, serializerId) = s.Serialize(message);
                 var typeIndex = batch.TypeNames.IndexOf(typeName);
 
                 if (typeIndex == -1)
@@ -37,6 +37,7 @@ namespace Proto.Cluster
                 {
                     MessageData = messageData,
                     TypeId = typeIndex,
+                    SerializerId = serializerId,
                 };
                 
                 batch.Envelopes.Add(topicEnvelope);
@@ -54,7 +55,7 @@ namespace Proto.Cluster
             //deserialize messages in the envelope
             var messages = Envelopes
                 .Select(e => ser
-                    .Deserialize(TypeNames[e.TypeId], e.MessageData, ser.DefaultSerializerId))
+                    .Deserialize(TypeNames[e.TypeId], e.MessageData, e.SerializerId))
                 .ToList();
 
             return new TopicBatchMessage(messages);

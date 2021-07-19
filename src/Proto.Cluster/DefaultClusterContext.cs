@@ -4,9 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -25,6 +23,7 @@ namespace Proto.Cluster
         private readonly ShouldThrottle _requestLogThrottle;
         private readonly TaskClock _clock;
         private static readonly ILogger Logger = Log.CreateLogger<DefaultClusterContext>();
+
         public DefaultClusterContext(IIdentityLookup identityLookup, PidCache pidCache, ClusterContextConfig config, CancellationToken killSwitch)
         {
             _identityLookup = identityLookup;
@@ -41,12 +40,11 @@ namespace Proto.Cluster
 
         public async Task<T?> RequestAsync<T>(ClusterIdentity clusterIdentity, object message, ISenderContext context, CancellationToken ct)
         {
-            
-            var start = DateTime.UtcNow;
+            var start = Stopwatch.StartNew();
             Logger.LogDebug("Requesting {ClusterIdentity} Message {Message}", clusterIdentity, message);
             var i = 0;
 
-            var future = new FutureProcess(context.System);
+            var future = context.GetFuture();
             PID? lastPid = null;
 
             try
@@ -55,24 +53,28 @@ namespace Proto.Cluster
                 {
                     if (context.System.Shutdown.IsCancellationRequested) return default;
 
-                    var delay = i * 20;
-                    i++;
+                    var source = PidSource.Cache;
+                    var pid = GetCachedPid(clusterIdentity);
 
-                    var (pid, source) = await GetPid(clusterIdentity, context, ct);
-
+                    if (pid is null)
+                    {
+                        source = PidSource.Lookup;
+                        pid = await GetPidFromLookup(clusterIdentity, context, ct);
+                    }
+                    
                     if (context.System.Shutdown.IsCancellationRequested) return default;
 
                     if (pid is null)
                     {
                         Logger.LogDebug("Requesting {ClusterIdentity} - Did not get PID from IdentityLookup", clusterIdentity);
-                        await Task.Delay(delay, CancellationToken.None);
+                        await Task.Delay(++i * 20, CancellationToken.None);
                         continue;
                     }
 
                     // Ensures that a future is not re-used against another actor.
                     if (lastPid is not null && !pid.Equals(lastPid)) RefreshFuture();
 
-                    Logger.LogDebug("Requesting {ClusterIdentity} - Got PID {Pid} from {Source}", clusterIdentity, pid, source);
+                    // Logger.LogDebug("Requesting {ClusterIdentity} - Got PID {Pid} from {Source}", clusterIdentity, pid, source);
                     var (status, res) = await TryRequestAsync<T>(clusterIdentity, message, pid, source, context, future);
 
                     switch (status)
@@ -83,7 +85,7 @@ namespace Proto.Cluster
                         case ResponseStatus.Exception:
                             RefreshFuture();
                             await RemoveFromSource(clusterIdentity, PidSource.Cache, pid);
-                            await Task.Delay(delay, CancellationToken.None);
+                            await Task.Delay(++i * 20, CancellationToken.None);
                             break;
                         case ResponseStatus.DeadLetter:
                             RefreshFuture();
@@ -105,7 +107,7 @@ namespace Proto.Cluster
 
                 if (!context.System.Shutdown.IsCancellationRequested && _requestLogThrottle().IsOpen())
                 {
-                    var t = DateTime.UtcNow - start;
+                    var t = start.Elapsed;
                     Logger.LogWarning("RequestAsync retried but failed for {ClusterIdentity}, elapsed {Time}", clusterIdentity, t);
                 }
 
@@ -119,24 +121,22 @@ namespace Proto.Cluster
             void RefreshFuture()
             {
                 future.Dispose();
-                future = new FutureProcess(context.System);
+                future = context.GetFuture();
                 lastPid = null;
             }
         }
 
-        private async Task RemoveFromSource(ClusterIdentity clusterIdentity, PidSource source, PID pid)
+        private async ValueTask RemoveFromSource(ClusterIdentity clusterIdentity, PidSource source, PID pid)
         {
             if (source == PidSource.Lookup) await _identityLookup.RemovePidAsync(clusterIdentity, pid, CancellationToken.None);
 
             _pidCache.RemoveByVal(clusterIdentity, pid);
         }
 
-        private async ValueTask<(PID?, PidSource)> GetPid(ClusterIdentity clusterIdentity, ISenderContext context, CancellationToken ct)
+        private async Task<PID?> GetPidFromLookup(ClusterIdentity clusterIdentity, ISenderContext context, CancellationToken ct)
         {
             try
             {
-                if (_pidCache.TryGet(clusterIdentity, out var cachedPid)) return (cachedPid, PidSource.Cache);
-
                 if (!context.System.Metrics.IsNoop)
                 {
                     var pid = await context.System.Metrics.Get<ClusterMetrics>().ClusterResolvePidHistogram
@@ -145,13 +145,13 @@ namespace Proto.Cluster
                         );
 
                     if (pid is not null) _pidCache.TryAdd(clusterIdentity, pid);
-                    return (pid, PidSource.Lookup);
+                    return pid;
                 }
                 else
                 {
                     var pid = await _identityLookup.GetAsync(clusterIdentity, ct);
                     if (pid is not null) _pidCache.TryAdd(clusterIdentity, pid);
-                    return (pid, PidSource.Lookup);
+                    return pid;
                 }
             }
             catch (Exception e)
@@ -160,7 +160,7 @@ namespace Proto.Cluster
 
                 if (_requestLogThrottle().IsOpen())
                     Logger.LogWarning(e, "Failed to get PID from IIdentityLookup for {ClusterIdentity}", clusterIdentity);
-                return (null, PidSource.Lookup);
+                return null;
             }
         }
 
@@ -170,20 +170,20 @@ namespace Proto.Cluster
             PID pid,
             PidSource source,
             ISenderContext context,
-            FutureProcess future
+            IFuture future
         )
         {
-            var t = DateTimeOffset.UtcNow;
+            var t = Stopwatch.StartNew();
+
             try
             {
-                if (future.Task.IsCompleted) return ToResult<T>(source, context, future.Task.Result);
+                context.Request(pid, message, future.Pid);
+                var task = future.Task;
+                await Task.WhenAny(task, _clock.CurrentBucket);
 
-                context.Send(pid, new MessageEnvelope(message, future.Pid));
-                await Task.WhenAny(future.Task, _clock.CurrentBucket);
-
-                if (future.Task.IsCompleted)
+                if (task.IsCompleted)
                 {
-                    var res = future.Task.Result;
+                    var res = task.Result;
 
                     return ToResult<T>(source, context, res);
                 }
@@ -209,20 +209,34 @@ namespace Proto.Cluster
             {
                 if (!context.System.Metrics.IsNoop)
                 {
-                    var elapsed = DateTimeOffset.UtcNow - t;
+                    var elapsed = t.Elapsed;
                     context.System.Metrics.Get<ClusterMetrics>().ClusterRequestHistogram
-                        .Observe(elapsed, new []{context.System.Id, context.System.Address, clusterIdentity.Kind, message.GetType().Name,
-                            source == PidSource.Cache ? "PidCache" : "IIdentityLookup"
-                        });
+                        .Observe(elapsed, new[]
+                            {
+                                context.System.Id, context.System.Address, clusterIdentity.Kind, message.GetType().Name,
+                                source == PidSource.Cache ? "PidCache" : "IIdentityLookup"
+                            }
+                        );
                 }
             }
-
         }
-    
 
-        private (ResponseStatus Ok, T?) ToResult<T>(PidSource source, ISenderContext context, object result)
+        private PID? GetCachedPid(ClusterIdentity clusterIdentity)
         {
-            switch (result)
+            var pid = clusterIdentity.CachedPid;
+
+            if (pid is null && _pidCache.TryGet(clusterIdentity, out pid))
+            {
+                clusterIdentity.CachedPid = pid;
+            }
+
+            return pid;
+        }
+        
+        private static (ResponseStatus Ok, T?) ToResult<T>(PidSource source, ISenderContext context, object result)
+        {
+            var message = MessageEnvelope.UnwrapMessage(result);
+            switch (message)
             {
                 case DeadLetterResponse:
                     if (!context.System.Shutdown.IsCancellationRequested)
@@ -232,7 +246,7 @@ namespace Proto.Cluster
                 case null: return (ResponseStatus.Ok, default);
                 case T t:  return (ResponseStatus.Ok, t);
                 default:
-                    Logger.LogWarning("Unexpected message. Was type {Type} but expected {ExpectedType}", result.GetType(), typeof(T));
+                    Logger.LogWarning("Unexpected message. Was type {Type} but expected {ExpectedType}", message.GetType(), typeof(T));
                     return (ResponseStatus.Exception, default);
             }
         }

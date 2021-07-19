@@ -108,13 +108,12 @@ namespace Proto.Cluster.Identity
                 var tries = 0;
                 PID? result = null;
                 SpawnLock? spawnLock = null;
-
-
+                
                 while (result == null && !_cluster.System.Shutdown.IsCancellationRequested && ++tries <= MaxSpawnRetries)
                 {
                     try
                     {
-                        var activation = await _storage.TryGetExistingActivation(clusterIdentity, CancellationTokens.WithTimeout(5000));
+                        var activation = await _storage.TryGetExistingActivation(clusterIdentity, CancellationTokens.FromSeconds(5));
 
                         //we got an existing activation, use this
                         if (activation != null)
@@ -133,11 +132,11 @@ namespace Proto.Cluster.Identity
                         spawnLock ??= await TryAcquireLock(clusterIdentity);
 
                         //we didn't get the lock, wait for activation to complete
-                        if (spawnLock == null) result = await WaitForActivation(clusterIdentity, CancellationTokens.WithTimeout(5000));
+                        if (spawnLock == null) result = await WaitForActivation(clusterIdentity, CancellationTokens.FromSeconds(5));
                         else
                         {
                             //we have the lock, spawn and return
-                            (result, spawnLock) = await SpawnActivationAsync(activator, spawnLock, CancellationTokens.WithTimeout(1000));
+                            (result, spawnLock) = await SpawnActivationAsync(activator, spawnLock, CancellationTokens.FromSeconds(5));
                         }
                     }
                     catch (OperationCanceledException e)
@@ -170,7 +169,7 @@ namespace Proto.Cluster.Identity
 
         private Task<SpawnLock?> TryAcquireLock(ClusterIdentity clusterIdentity)
         {
-            async Task<SpawnLock?> Inner() => await _storage.TryAcquireLock(clusterIdentity, CancellationTokens.WithTimeout(5000));
+            Task<SpawnLock?> Inner() => _storage.TryAcquireLock(clusterIdentity, CancellationTokens.FromSeconds(5));
 
             return Metrics.TryAcquireLockHistogram.Observe(Inner, _cluster.System.Id, _cluster.System.Address, clusterIdentity.Kind);
         }
@@ -243,7 +242,7 @@ namespace Proto.Cluster.Identity
         {
             if (activation?.Pid == null) return null;
 
-            var memberExists = activation.MemberId == null || _memberList.ContainsMemberId(activation.MemberId);
+            var memberExists = _memberList.ContainsMemberId(activation.MemberId);
             if (memberExists) return activation.Pid;
 
             if (StaleMembers.TryAdd(activation.MemberId!))

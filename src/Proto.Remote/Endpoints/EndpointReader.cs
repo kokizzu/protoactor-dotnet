@@ -49,7 +49,9 @@ namespace Proto.Remote
             return Task.FromResult(
                 new ConnectResponse
                 {
-                    DefaultSerializerId = _serialization.DefaultSerializerId
+                    // NOTE: This is here for backward compatibility. Current version of Serialization
+                    // implementation doesn't utilize the default serializer idea.
+                    DefaultSerializerId = Serialization.SERIALIZER_ID_PROTOBUF,
                 }
             );
         }
@@ -95,7 +97,9 @@ namespace Proto.Remote
 
                 for (var i = 0; i < batch.TargetNames.Count; i++)
                 {
-                    targets[i] = PID.FromAddress(_system.Address, batch.TargetNames[i]);
+                    var pid = PID.FromAddress(_system.Address, batch.TargetNames[i]);
+                    pid.Ref(_system);
+                    targets[i] = pid;
                 }
 
                 var typeNames = batch.TypeNames.ToArray();
@@ -105,6 +109,11 @@ namespace Proto.Remote
                 foreach (var envelope in batch.Envelopes)
                 {
                     var target = targets[envelope.Target];
+
+                    if (envelope.RequestId != default)
+                    {
+                        target = target.WithRequestId(envelope.RequestId);
+                    }
                     var typeName = typeNames[envelope.TypeId];
 
                     if (!_system.Metrics.IsNoop) m.Inc(new[] {_system.Id, _system.Address, typeName});

@@ -16,6 +16,7 @@ using Proto.Cluster.Identity;
 using Proto.Cluster.Identity.MongoDb;
 using Proto.Cluster.Identity.Redis;
 using Proto.Cluster.Kubernetes;
+using Proto.Cluster.Partition;
 using Proto.Remote;
 using Proto.Remote.GrpcCore;
 using Serilog;
@@ -35,7 +36,9 @@ namespace ClusterExperiment1
             var helloProps = Props.FromProducer(() => new WorkerActor());
             return ClusterConfig
                 .Setup("mycluster", clusterProvider, identityLookup)
-                .WithClusterKind("hello", helloProps);
+                .WithClusterContextProducer(cluster => new ExperimentalClusterContext(cluster))
+                .WithClusterKind("hello", helloProps)
+                .WithGossipFanOut(3);
         }
 
         private static GrpcCoreRemoteConfig GetRemoteConfig()
@@ -69,7 +72,7 @@ namespace ClusterExperiment1
             }
         }
 
-        public static IIdentityLookup GetIdentityLookup() => GetMongoIdentityLookup();//  GetRedisIdentityLookup();// new PartitionIdentityLookup(TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(500));
+        public static IIdentityLookup GetIdentityLookup() => new PartitionIdentityLookup(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 
         private static IIdentityLookup GetRedisIdentityLookup()
         {
@@ -106,9 +109,13 @@ namespace ClusterExperiment1
 
         public static async Task<Cluster> SpawnMember()
         {
-            var system = new ActorSystem(new ActorSystemConfig().WithDeadLetterThrottleCount(3)
+            var system = new ActorSystem(new ActorSystemConfig()
+                .WithSharedFutures()
+                .WithDeadLetterThrottleCount(3)
                 .WithDeadLetterThrottleInterval(TimeSpan.FromSeconds(1))
                 .WithDeadLetterRequestLogging(false)
+                .WithDeveloperSupervisionLogging(false)
+                .WithDeveloperReceiveLogging(TimeSpan.FromSeconds(1))
             );
             system.EventStream.Subscribe<ClusterTopology>(e => {
                 Console.ForegroundColor = ConsoleColor.Yellow;
@@ -131,6 +138,7 @@ namespace ClusterExperiment1
         public static async Task<Cluster> SpawnClient()
         {
             var system = new ActorSystem(new ActorSystemConfig().WithDeadLetterThrottleCount(3)
+                .WithSharedFutures()
                 .WithDeadLetterThrottleInterval(TimeSpan.FromSeconds(1))
                 .WithDeadLetterRequestLogging(false)
             );
@@ -152,14 +160,14 @@ namespace ClusterExperiment1
             return system.Cluster();
         }
 
-        public static void SetupLogger()
+        public static void SetupLogger(LogLevel loglevel)
         {
             Log.Logger = new LoggerConfiguration()
                 .WriteTo.Console(LogEventLevel.Error)
                 .CreateLogger();
             
             Proto.Log.SetLoggerFactory(LoggerFactory.Create(l =>
-                    l.AddSerilog().SetMinimumLevel(LogLevel.Error)
+                    l.AddSerilog().SetMinimumLevel(loglevel)
                 )
             );
         }
