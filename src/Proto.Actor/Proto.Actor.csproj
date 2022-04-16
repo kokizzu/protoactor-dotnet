@@ -3,12 +3,12 @@
     <RootNamespace>Proto</RootNamespace>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
-    <LangVersion>9</LangVersion>
+    <LangVersion>10</LangVersion>
     <TargetFrameworks>net5.0;net6.0;netstandard2.1</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Google.Protobuf" Version="3.19.4" />
+    <PackageReference Include="Google.Protobuf" Version="3.20.0" />
     <PackageReference Include="Grpc.Tools" Version="2.42.0" PrivateAssets="All" />
     <PackageReference Include="IsExternalInit.System.Runtime.CompilerServices" Version="1.0.0" Condition="'$(TargetFramework)' == 'netstandard2.1'" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="6.0.0" />
